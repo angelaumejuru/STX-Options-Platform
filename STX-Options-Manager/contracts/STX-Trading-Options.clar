@@ -1,4 +1,4 @@
-;; Complete STX Options Smart Contract - All Essential On-Chain Components
+;; STX Options Smart Contract
 ;; Comprehensive on-chain functionality for decentralized options trading
 ;; Includes collateral management, automated settlement, access controls, and emergency functions
 ;; All critical blockchain-required functionality with proper security measures
@@ -112,12 +112,17 @@
   )
 )
 
+;; Fixed collateral calculation with proper validation
 (define-private (calculate-required-collateral (option-type uint) (strike-price uint) (contract-size uint))
-  (if (is-eq option-type call-option-type)
-    ;; Call option: collateral = contract-size * strike-price (for covered calls)
-    (* contract-size strike-price)
-    ;; Put option: collateral = contract-size * strike-price (cash-secured puts)
-    (* contract-size strike-price)
+  (begin
+    ;; These inputs should already be validated before this function is called
+    ;; This function now assumes validated inputs
+    (if (is-eq option-type call-option-type)
+      ;; Call option: collateral = contract-size * strike-price (for covered calls)
+      (* contract-size strike-price)
+      ;; Put option: collateral = contract-size * strike-price (cash-secured puts)
+      (* contract-size strike-price)
+    )
   )
 )
 
@@ -215,7 +220,7 @@
   (map-get? price-feeds { feed-block: feed-block })
 )
 
-;; OPTION CREATION WITH COLLATERAL
+;; OPTION CREATION WITH PROPER INPUT VALIDATION
 
 (define-public (create-option-contract 
     (strike-price uint)
@@ -223,13 +228,12 @@
     (expiration-block uint)
     (option-type uint)
     (contract-size uint))
-  (let ((new-option-id (var-get next-option-id))
-        (required-collateral (calculate-required-collateral option-type strike-price contract-size)))
+  (let ((new-option-id (var-get next-option-id)))
     
     ;; Platform state checks
     (asserts! (check-not-paused) ERR-CONTRACT-PAUSED)
     
-    ;; Input validation
+    ;; Input validation BEFORE any calculations
     (asserts! (and (>= strike-price minimum-strike-price) (<= strike-price maximum-strike-price)) ERR-INVALID-STRIKE-PRICE)
     (asserts! (> premium-amount u0) ERR-INVALID-PREMIUM)
     (asserts! (and (>= contract-size minimum-contract-size) (<= contract-size maximum-contract-size)) ERR-INVALID-CONTRACT-SIZE)
@@ -239,43 +243,49 @@
               ) ERR-INVALID-EXPIRATION)
     (asserts! (is-valid-option-type option-type) ERR-UNSUPPORTED-OPTION-TYPE)
     
-    ;; Check collateral availability
-    (let ((writer-collateral-data (unwrap! (map-get? writer-collateral { writer: tx-sender }) 
-                                           ERR-INSUFFICIENT-COLLATERAL)))
-      (asserts! (>= (get available-balance writer-collateral-data) required-collateral) ERR-INSUFFICIENT-COLLATERAL)
+    ;; Now calculate required collateral with validated inputs
+    (let ((required-collateral (calculate-required-collateral option-type strike-price contract-size)))
       
-      ;; Lock collateral
-      (map-set writer-collateral
-        { writer: tx-sender }
-        { 
-          total-locked: (+ (get total-locked writer-collateral-data) required-collateral),
-          available-balance: (- (get available-balance writer-collateral-data) required-collateral)
+      (asserts! (> required-collateral u0) ERR-INSUFFICIENT-COLLATERAL)
+      
+      ;; Check collateral availability
+      (let ((writer-collateral-data (unwrap! (map-get? writer-collateral { writer: tx-sender }) 
+                                             ERR-INSUFFICIENT-COLLATERAL)))
+        (asserts! (>= (get available-balance writer-collateral-data) required-collateral) ERR-INSUFFICIENT-COLLATERAL)
+        
+        ;; Lock collateral
+        (map-set writer-collateral
+          { writer: tx-sender }
+          { 
+            total-locked: (+ (get total-locked writer-collateral-data) required-collateral),
+            available-balance: (- (get available-balance writer-collateral-data) required-collateral)
+          }
+        )
+      )
+      
+      ;; Create option contract
+      (map-set options-registry
+        { option-id: new-option-id }
+        {
+          option-writer: tx-sender,
+          option-holder: tx-sender,
+          strike-price: strike-price,
+          premium-amount: premium-amount,
+          expiration-block: expiration-block,
+          option-type: option-type,
+          contract-status: status-active,
+          contract-size: contract-size,
+          creation-block: block-height,
+          collateral-amount: required-collateral,
+          collateral-locked: true
         }
       )
+      
+      ;; Increment counter
+      (var-set next-option-id (+ new-option-id u1))
+      
+      (ok new-option-id)
     )
-    
-    ;; Create option contract
-    (map-set options-registry
-      { option-id: new-option-id }
-      {
-        option-writer: tx-sender,
-        option-holder: tx-sender,
-        strike-price: strike-price,
-        premium-amount: premium-amount,
-        expiration-block: expiration-block,
-        option-type: option-type,
-        contract-status: status-active,
-        contract-size: contract-size,
-        creation-block: block-height,
-        collateral-amount: required-collateral,
-        collateral-locked: true
-      }
-    )
-    
-    ;; Increment counter
-    (var-set next-option-id (+ new-option-id u1))
-    
-    (ok new-option-id)
   )
 )
 
